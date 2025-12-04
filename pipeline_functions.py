@@ -106,6 +106,7 @@ def load_reference_peaks(record_path, up_factor=1):
         return None
 
 def load_ground_truth(full_path, total_samples, up_factor):
+    
     """
     Carica e allinea i picchi di riferimento
     """
@@ -121,16 +122,59 @@ def load_ground_truth(full_path, total_samples, up_factor):
     return segment_gt_aligned, gt_status
 
 def extract_and_analyze(fetal_matrix, extractor, target_fs):
-    """
-    Applica PCA per ridurre le dimensioni e rileva i picchi fetali.
-    """
     pca = PCA(n_components=1)
+    # Appiattisci il risultato
     best_signal_fet = pca.fit_transform(fetal_matrix).flatten()
+
+    # --- CORREZIONE POLARITÀ ---
+    # Se la skewness è negativa, probabilmente i picchi sono verso il basso.
+    # Oppure, un metodo più robusto per l'ECG: controlla il segno del picco massimo assoluto
+    if np.abs(np.min(best_signal_fet)) > np.abs(np.max(best_signal_fet)):
+        best_signal_fet = -best_signal_fet
+    # ---------------------------
 
     f_peaks = extractor.detect_fetal_peaks(best_signal_fet, dist_sec=0.25)
     
     return best_signal_fet, f_peaks
+
+def evaluate_performance(ref_peaks, det_peaks, fs, tol_ms=50):
+    """
+    Confronta i picchi rilevati con quelli di riferimento.
+    Calcola TP (True Positive), FP (False Positive), FN (False Negative).
+    """
+    tolerance_samples = int((tol_ms / 1000.0) * fs)
     
+    tp = 0
+    fp = 0
+    fn = 0
+    
+    det_peaks_list = list(det_peaks)
+    
+    for ref in ref_peaks:
+        matches = [d for d in det_peaks_list if abs(d - ref) <= tolerance_samples]
+        
+        if matches:
+            tp += 1
+            det_peaks_list.remove(matches[0]) 
+        else:
+            fn += 1
+            
+    fp = len(det_peaks_list)
+    
+    # Calcolo metriche
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    f1_score = 2 * (precision * sensitivity) / (precision + sensitivity) if (precision + sensitivity) > 0 else 0
+    accuracy = (tp) / (tp + fp + fn) if (tp + fp + fn) > 0 else 0
+    
+    
+    return {
+        "Accuracy": accuracy * 100,
+        "Se": sensitivity * 100, # Sensibilità %
+        "PPV": precision * 100,  # Valore Predittivo Positivo %
+        "F1": f1_score * 100     # F1 Score %
+    }
+
 def calculate_paper_metrics(f_peaks, fs, total_samples):
     """ 
     Calcola le metriche di reliability e BPM medio.
