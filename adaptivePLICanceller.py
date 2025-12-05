@@ -49,8 +49,7 @@ class AdaptivePLICanceller:
         
     def _apply_comb_filter_and_detect_blocking(self, d_k):
         """
-        Sezione II-E: Adaptation Blocking
-        Usa un filtro a pettine (Comb) per stimare l'energia del segnale (QRS)
+        Usa un filtro a pettine (Comb) per stimare l'energia del segnale
         senza l'interferenza di rete, per decidere quando bloccare l'adattamento.
         """
 
@@ -77,6 +76,7 @@ class AdaptivePLICanceller:
         Esegue il loop di cancellazione adattiva (Sample-by-sample).
         Implementa lo schema di Figura 4 e le Equazioni 30-32.
         """
+        
         n_samples = len(signal)
         e_output = np.zeros(n_samples)
         
