@@ -8,13 +8,10 @@ class MECGCanceller:
     def __init__(self, fs):
         self.fs = fs
         
-        # Finestre
-        self.win_pre = 0.2        # secondi prima del picco
-        self.win_post = 0.4       # secondi dopo il picco
-        self.n_avg = 10           # template da mediare
-        self.qrs_win = 0.04       # finestra centrale stretta per regressione
-
-        # Regolarizzazione LMS (Ridge)
+        self.win_pre = 0.2
+        self.win_post = 0.4
+        self.n_avg = 10
+        self.qrs_win = 0.04
         self.lam = 1e-3
 
     def _bandpass_detect(self, X):
@@ -22,20 +19,26 @@ class MECGCanceller:
         return filtfilt(b, a, X, axis=0)
 
     def _detect_maternal_qrs(self, signal_matrix):
-        
-        # --- FASE 1: Rilevamento Robusto (IL TUO CODICE) ---
-        # Questa parte è ottima per non perdere nessun battito, anche se rumoroso.
+        """
+        Rileva i complessi QRS materni utilizzando un approccio a due stadi per massima precisione temporale.
+
+        Fase 1:
+        - Fusione dei canali tramite PCA per isolare la componente materna dominante.
+        - Calcolo dell'inviluppo di Hilbert per enfatizzare i picchi di energia.
+        - Sogliatura dinamica per trovare i candidati R-peak iniziali.
+
+        Fase 2:
+        - Creazione di un template mediano dai battiti rilevati.
+        - Allineamento fine di ogni battito tramite cross-correlazione col template (metodo Abboud & Beker).
+        """
         
         bp = self._bandpass_detect(signal_matrix)
         centered = bp - np.mean(bp, axis=0)
         pca_signal = PCA(n_components=1).fit_transform(centered).flatten()
 
-        # Importante: Hilbert distrugge la polarità. 
-        # Salviamo il segnale PCA con polarità corretta per dopo.
         if np.max(pca_signal) < np.abs(np.min(pca_signal)):
-            pca_signal = -pca_signal  # Rendo il picco R positivo per comodità
+            pca_signal = -pca_signal
 
-        # Calcolo Envelope per detection (come facevi tu)
         env = np.abs(hilbert(pca_signal))
         win = int(0.02 * self.fs)
         env_smooth = np.convolve(env, np.ones(win)/win, mode='same')
@@ -43,14 +46,9 @@ class MECGCanceller:
         thresh = np.mean(env_smooth) + 1.5*np.std(env_smooth)
         min_dist = int(0.35 * self.fs)
         
-        # Questi sono i picchi "grezzi" (affetti da jitter dovuto allo smoothing)
         rough_peaks, _ = find_peaks(env_smooth, height=thresh, distance=min_dist)
 
-        # --- FASE 2: Raffinamento alla Abboud & Beker (ALIGNMENT) ---
-        # Usiamo i picchi grezzi solo come indizi per trovare il VERO centro nel segnale raw.
-        
-        # 1. Costruiamo il Template Reale (Mediana dei battiti estratti dal segnale PCA pulito)
-        window_sec = 0.08 # 80ms bastano per il nucleo del QRS
+        window_sec = 0.08
         w_half = int((window_sec * self.fs) / 2)
         
         segments = []
@@ -63,31 +61,21 @@ class MECGCanceller:
             
         if not segments: return rough_peaks, pca_signal
 
-        # Template MEDIO del paziente
         maternal_template = np.median(np.array(segments), axis=0)
         
-        # 2. Cross-Correlazione per correggere il Jitter
         final_peaks = []
-        search_window = 10 # Cerchiamo +/- 10 samples intorno al picco grezzo
+        search_window = 10
         
         for p in valid_rough:
+            
             start = p - w_half - search_window
             end = p + w_half + search_window
             
             if start < 0 or end >= len(pca_signal): continue
             
-            # Segmento locale raw
             segment = pca_signal[start:end]
-            
-            # Correlazione con il template
             cc = correlate(segment, maternal_template, mode='valid')
-            
-            # Il picco della correlazione è il punto di allineamento perfetto
             shift_idx = np.argmax(cc)
-            
-            # Calcolo la posizione assoluta corretta
-            # start + shift_idx ci porta all'inizio del match.
-            # Aggiungiamo w_half per trovare il centro del QRS.
             true_peak = start + shift_idx + w_half
             
             final_peaks.append(true_peak)
@@ -95,7 +83,10 @@ class MECGCanceller:
         return np.array(final_peaks), pca_signal
 
     def _get_segments(self, win_len):
-
+        """
+        Suddivide la finestra del battito in tre regioni morfologiche: onda P, QRS e onda T
+        """
+        
         center = int(self.win_pre * self.fs)
         qrs_rad = int(self.qrs_win * self.fs)
 
@@ -111,11 +102,13 @@ class MECGCanceller:
         return (p_start, p_end), (qrs_start, qrs_end), (t_start, t_end)
 
     def _extract_beat(self, sig, peak, win_len, n_samples):
-        """Estrae un segmento di segnale centrato (o quasi) sul picco."""
+        """
+        Estrae un segmento di segnale centrato (o quasi) sul picco.
+        """
+        
         start = peak - int(self.win_pre * self.fs)
         end = start + win_len
         
-        # Controllo bordi
         if start < 0 or end > n_samples:
             return None
         
@@ -123,33 +116,35 @@ class MECGCanceller:
 
     def apply(self, signal_matrix):
         
-        # Dimensioni originali
-        n_samples_orig, n_channels = signal_matrix.shape
+        """
+        Applica l'algoritmo di cancellazione dell'ECG materno (MECG) tramite sottrazione di template adattivo.
+
+        Il metodo esegue le seguenti operazioni:
+        1. Padding del segnale per gestire i bordi.
+        2. Rilevamento dei complessi QRS materni.
+        3. Per ogni canale, costruisce un template medio dinamico (running average) del battito materno.
+        4. Adatta il template al battito corrente (scaling dei segmenti P, QRS, T) utilizzando i minimi quadrati regolarizzati (Ridge Regression).
+        5. Sottrae la stima materna per isolare il residuo fetale.
+        """
         
-        # 1) Calcoliamo quanto padding serve
-        # Aggiungiamo un po' di margine oltre alle finestre definite
+        _, n_channels = signal_matrix.shape
+        
         pad_pre = int(self.win_pre * self.fs) + 100
         pad_post = int(self.win_post * self.fs) + 100
         
-        # 2) Eseguiamo il padding del segnale (modalità 'edge' ripete l'ultimo valore)
-        # axis=((pad_pre, pad_post), (0,0)) significa: pad temporale, nessun pad sui canali
         sig_padded = np.pad(signal_matrix, ((pad_pre, pad_post), (0, 0)), mode='edge')
         
         n_samples_pad = sig_padded.shape[0]
         fetal_ecg_padded = np.zeros_like(sig_padded)
 
-        # 3) Rileviamo i picchi SUL SEGNALE PADDATO
-        # (Così i picchi originali saranno spostati in avanti di 'pad_pre')
-        m_peaks, pca_sig = self._detect_maternal_qrs(sig_padded)
+        m_peaks, _ = self._detect_maternal_qrs(sig_padded)
 
-        # 4) Cancellazione canale-per-canale (logica identica a prima)
         win_len = int((self.win_pre + self.win_post) * self.fs)
         
         for ch in range(n_channels):
             sig = sig_padded[:, ch]
             residue = sig.copy()
             
-            # --- SEEDING (Inizializzazione buffer) ---
             init_beats = []
             for peak in m_peaks:
                 beat = self._extract_beat(sig, peak, win_len, n_samples_pad)
@@ -164,7 +159,7 @@ class MECGCanceller:
             
             for peak in m_peaks:
                 curr = self._extract_beat(sig, peak, win_len, n_samples_pad)
-                if curr is None: continue # Non dovrebbe succedere grazie al padding
+                if curr is None: continue
                 
                 if len(templates) > 0:
                     avg_template = np.mean(templates, axis=0)
@@ -174,7 +169,6 @@ class MECGCanceller:
                 templates.append(curr)
                 if len(templates) > self.n_avg: templates.pop(0)
 
-                # LMS
                 M = np.zeros((win_len, 3))
                 (p_s, p_e), (q_s, q_e), (t_s, t_e) = self._get_segments(win_len)
                 M[p_s:p_e, 0] = avg_template[p_s:p_e]
@@ -189,7 +183,6 @@ class MECGCanceller:
                 except:
                     fitted = 0
 
-                # Sottrazione (attenzione agli indici padded)
                 start = peak - int(self.win_pre * self.fs)
                 end = start + win_len
                 residue[start:end] = curr - fitted

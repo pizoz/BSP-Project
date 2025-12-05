@@ -31,6 +31,7 @@ def design_baseline_filter(fs, fc_high=3.0, taps=1001):
     """
     Progetta il filtro FIR passa-alto per il baseline wander
     """
+    
     if taps % 2 == 0: taps += 1
     b_fir = firwin(taps, fc_high, fs=fs, pass_zero=False, window='hamming')
     a_fir = [1.0]
@@ -41,20 +42,14 @@ def resample_ecg(signal, fs_old, fs_new):
     Ricampiona un segnale ECG multicanale dalla frequenza fs_old a fs_new.
     Usa un filtro polifase (resample_poly) per evitare aliasing e distorsioni ai bordi.
     """
-    # Se le frequenze sono identiche, restituisci il segnale originale (o una copia)
+    
     if fs_old == fs_new:
-        print(f"  -> FS già a {fs_new}Hz. Nessun ricampionamento applicato.")
         return signal.copy()
     
-    # Calcola il massimo comune divisore per trovare i fattori interi minimi
-    # Esempio: fs_old=400, fs_new=2000 -> gcd=400 -> up=5, down=1
     gcd = math.gcd(fs_old, fs_new)
     up = fs_new // gcd
     down = fs_old // gcd
     
-    print(f"  -> Resampling: {fs_old}Hz -> {fs_new}Hz (up={up}, down={down})")
-    
-    # axis=0 indica che ricampioniamo lungo la dimensione temporale
     resampled_signal = resample_poly(signal, up, down, axis=0)
     
     return resampled_signal
@@ -63,12 +58,11 @@ def preprocess_signal(raw, fs_native, target_fs):
     """
     Esegue filtraggio baseline, PLI cancellation, upsampling e cancellazione MECG.
     """
+    
     _, n_channels = raw.shape
     
-    # 1. Filtro Baseline
     b_base, a_base = design_baseline_filter(fs_native, fc_high=3.0)
     
-    # 2. Loop sui canali per filtraggio base e PLI
     filtered_sigs = np.zeros_like(raw)
     for ch in range(n_channels):
         sig = raw[:, ch]
@@ -76,14 +70,12 @@ def preprocess_signal(raw, fs_native, target_fs):
         pli_canceller = AdaptivePLICanceller(fs_native, f_line=50.0)
         filtered_sigs[:, ch] = pli_canceller.apply(sig_no_base)
         
-    # 3. Upsampling
     up_factor = int(target_fs / fs_native)
     if up_factor > 1:
         sig_upsampled = resample_poly(filtered_sigs, up_factor, 1, axis=0)
     else:
         sig_upsampled = filtered_sigs
     
-    # S4
     S4 = sig_upsampled.copy() 
 
     mecg_canceller = MECGCanceller(target_fs)
@@ -122,20 +114,31 @@ def load_ground_truth(full_path, total_samples, up_factor):
     return segment_gt_aligned, gt_status
 
 def extract_and_analyze(fetal_matrix, extractor, target_fs):
+    
     pca = PCA(n_components=1)
-    # Appiattisci il risultato
     best_signal_fet = pca.fit_transform(fetal_matrix).flatten()
 
-    # --- CORREZIONE POLARITÀ ---
-    # Se la skewness è negativa, probabilmente i picchi sono verso il basso.
-    # Oppure, un metodo più robusto per l'ECG: controlla il segno del picco massimo assoluto
     if np.abs(np.min(best_signal_fet)) > np.abs(np.max(best_signal_fet)):
         best_signal_fet = -best_signal_fet
-    # ---------------------------
 
     f_peaks = extractor.detect_fetal_peaks(best_signal_fet, dist_sec=0.25)
+    average_beat, _  = extractor.compute_average_beat(best_signal_fet, f_peaks, window_sec=0.125)
     
-    return best_signal_fet, f_peaks
+    return best_signal_fet, average_beat, f_peaks
+
+def extract_and_analyze_multichannel(fetal_matrix, extractor, target_fs):
+
+    pca = PCA(n_components=1)
+    detection_signal = pca.fit_transform(fetal_matrix).flatten()
+
+    if np.abs(np.min(detection_signal)) > np.abs(np.max(detection_signal)):
+        detection_signal = -detection_signal
+
+    f_peaks = extractor.detect_fetal_peaks(detection_signal, dist_sec=0.25)
+
+    average_beat_matrix, _ = extractor.compute_average_beat(fetal_matrix, f_peaks, window_sec=0.125)
+    
+    return fetal_matrix, average_beat_matrix, f_peaks
 
 def evaluate_performance(ref_peaks, det_peaks, fs, tol_ms=50):
     """
@@ -161,7 +164,6 @@ def evaluate_performance(ref_peaks, det_peaks, fs, tol_ms=50):
             
     fp = len(det_peaks_list)
     
-    # Calcolo metriche
     sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0
     f1_score = 2 * (precision * sensitivity) / (precision + sensitivity) if (precision + sensitivity) > 0 else 0
@@ -170,9 +172,9 @@ def evaluate_performance(ref_peaks, det_peaks, fs, tol_ms=50):
     
     return {
         "Accuracy": accuracy * 100,
-        "Se": sensitivity * 100, # Sensibilità %
-        "PPV": precision * 100,  # Valore Predittivo Positivo %
-        "F1": f1_score * 100     # F1 Score %
+        "Se": sensitivity * 100,
+        "PPV": precision * 100,
+        "F1": f1_score * 100
     }
 
 def calculate_paper_metrics(f_peaks, fs, total_samples):
@@ -213,7 +215,7 @@ def calculate_paper_metrics(f_peaks, fs, total_samples):
     
     return reliability, mean_bpm, is_successful
 
-def calculate_snr_sir(s4, s5, s6):
+def calculate_snr_sir(s4, s5, s6, noise):
     """
     Implementazione esatta Eq (4) e (5)
     """
@@ -227,8 +229,7 @@ def calculate_snr_sir(s4, s5, s6):
     P_F = power(s6)
     mecg_est = s4 - s5
     P_M = power(mecg_est)
-    noise_est = s5 - s6
-    P_N = power(noise_est)
+    P_N = power(noise)
     
     snr_linear = P_F / (P_N + eps)
     sir_linear = P_F / (P_M + eps)
@@ -238,40 +239,108 @@ def calculate_snr_sir(s4, s5, s6):
     
     return np.mean(snr_db), np.mean(sir_db)
 
+def subtract_average_beat(s5_signal, peaks, average_beat_matrix):
+    """
+    Sottrae il template medio dal segnale S5 per ottenere il rumore.
+    """
+    
+    win_samples, _ = average_beat_matrix.shape
+    half_win = win_samples // 2
+    
+    n_samples_total = s5_signal.shape[0]
+
+    noise_residual = s5_signal.copy()
+    
+    for p in peaks:
+        start = p - half_win
+        end = start + win_samples 
+        
+        if start < 0:
+            offset = -start
+            if end > 0:
+                 noise_residual[0:end, :] -= average_beat_matrix[offset:, :]
+                 
+        elif end > n_samples_total:
+            excess = end - n_samples_total
+            valid_len = win_samples - excess
+            if valid_len > 0:
+                noise_residual[start:n_samples_total, :] -= average_beat_matrix[:valid_len, :]
+                
+        else:
+            noise_residual[start:end, :] -= average_beat_matrix
+
+    return noise_residual
+
+"""
+    Plot functions
+"""
 def plot_results(rec_name, signal, detected_peaks, gt_peaks, extractor, target_fs):
     
-    plt.figure(figsize=(15, 10))
+    plt.figure(figsize=(15, 12))
+    
     ax1 = plt.subplot(2, 1, 1)
+    
     start_s, duration_s = 20, 10
-    s_idx = start_s * target_fs
-    e_idx = (start_s + duration_s) * target_fs
-    if e_idx > len(signal): e_idx = len(signal)
+    s_idx = int(start_s * target_fs)
+    e_idx = int((start_s + duration_s) * target_fs)
+    
+    if e_idx > len(signal): 
+        e_idx = len(signal)
+        s_idx = max(0, e_idx - int(duration_s * target_fs))
 
     t_zoom = np.arange(s_idx, e_idx) / target_fs
     sig_zoom = signal[s_idx:e_idx]
-    
-    plt.plot(t_zoom, sig_zoom, color='green', alpha=0.5, label='Segnale Residuo PCA')
-    
+
+    if signal.ndim > 1:
+        n_channels = signal.shape[1]
+        colors = plt.cm.viridis(np.linspace(0, 1, n_channels))
+        for ch in range(n_channels):
+            plt.plot(t_zoom, sig_zoom[:, ch], color=colors[ch], alpha=0.6, label=f'Ch {ch+1}')
+        
+        ref_full_signal = signal[:, 0]
+        plt.title(f"Segnale Multicanale (Zoom {duration_s}s) - {rec_name}")
+    else:
+        plt.plot(t_zoom, sig_zoom, color='green', alpha=0.8, label='Segnale Residuo')
+        ref_full_signal = signal
+        plt.title(f"Segnale Residuo (Zoom {duration_s}s) - {rec_name}")
+
     p_alg = detected_peaks[(detected_peaks >= s_idx) & (detected_peaks < e_idx)]
     if len(p_alg) > 0:
-        plt.scatter(p_alg/target_fs, signal[p_alg], color='red', marker='x', s=100, lw=2, label='Rilevati', zorder=5)
+        plt.scatter(p_alg/target_fs, ref_full_signal[p_alg], 
+                   color='red', marker='x', s=100, lw=2, label='Rilevati (Alg)', zorder=5)
     
     if len(gt_peaks) > 0:
         gt_zoom = gt_peaks[(gt_peaks >= s_idx) & (gt_peaks < e_idx)]
         if len(gt_zoom) > 0:
-            plt.scatter(gt_zoom/target_fs, signal[gt_zoom], facecolors='none', edgecolors='blue', marker='o', s=150, lw=2, label='GT')
+            plt.scatter(gt_zoom/target_fs, ref_full_signal[gt_zoom], 
+                       facecolors='none', edgecolors='blue', marker='o', s=150, lw=2, label='GT')
 
-    plt.legend(loc='upper right')
+    plt.legend(loc='upper right', fontsize='small', ncol=2)
     plt.grid(True, alpha=0.3)
+    plt.ylabel("Ampiezza")
 
     ax2 = plt.subplot(2, 1, 2)
-    avg_beat, _ = extractor.compute_average_beat(signal, detected_peaks)
+    
+    avg_beat, num_beats = extractor.compute_average_beat(signal, detected_peaks)
     
     t_ms = np.linspace(0, 250, len(avg_beat))
     
-    plt.plot(t_ms, avg_beat, color='blue', lw=2)
-    plt.title("Morfologia Fetale Media")
+    if avg_beat.ndim > 1:
+        n_channels = avg_beat.shape[1]
+        colors = plt.cm.viridis(np.linspace(0, 1, n_channels))
+        
+        for ch in range(n_channels):
+            plt.plot(t_ms, avg_beat[:, ch], color=colors[ch], lw=2, alpha=0.8, label=f'Ch {ch+1}')
+        
+        plt.legend(loc='upper right')
+        plt.title(f"Morfologia Fetale Media (Multicanale) - Basata su {num_beats} battiti")
+    else:
+        # Plot Monocanale
+        plt.plot(t_ms, avg_beat, color='blue', lw=2)
+        plt.title(f"Morfologia Fetale Media - Basata su {num_beats} battiti")
+
     plt.xlabel("Tempo (ms)")
+    plt.ylabel("Ampiezza Media")
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -284,12 +353,10 @@ def debug_plot_overlay(raw, fs_raw, processed, fs_proc, title="Sovrapposizione R
     e_idx_raw = int((start_s + duration_s) * fs_raw)
     e_idx_raw = min(e_idx_raw, len(raw))
     
-    # Processed
     s_idx_proc = int(start_s * fs_proc)
     e_idx_proc = int((start_s + duration_s) * fs_proc)
     e_idx_proc = min(e_idx_proc, len(processed))
     
-    # Necessari perché fs è diversa
     t_raw = np.arange(s_idx_raw, e_idx_raw) / fs_raw
     t_proc = np.arange(s_idx_proc, e_idx_proc) / fs_proc
 
@@ -308,45 +375,85 @@ def debug_plot_overlay(raw, fs_raw, processed, fs_proc, title="Sovrapposizione R
     plt.tight_layout()
     plt.show()
 
-def get_average_beat_per_channel(signal, peaks, window_sec=0.25, fs=2000):
+def plot_pipeline_stages(s1_raw, s3_cleaned, s5_cancelled, s6_avg_beat, fs, start_sec=10, duration_sec=4):
 
-    n_samples, n_channels = signal.shape
-    win_samples = int(window_sec * fs)
-    half_win = win_samples // 2
+    color_signal = "#A50000"
+    color_beat = '#FDB813'
+    line_width = 1.2
     
-    avg_beats = np.zeros((win_samples, n_channels))
+    idx_start = int(start_sec * fs)
+    idx_end = int((start_sec + duration_sec) * fs)
     
-    for ch in range(n_channels):
-        beats = []
-        for p in peaks:
-            start = p - half_win
-            end = p + half_win
-            if start >= 0 and end < n_samples:
-                beats.append(signal[start:end, ch])
+    if idx_end > len(s1_raw):
+        idx_end = len(s1_raw)
+        idx_start = max(0, idx_end - int(duration_sec * fs))
+    
+    _, axes = plt.subplots(nrows=4, ncols=4, figsize=(18, 10), constrained_layout=True)
+    
+    cols_titles = ["S1 raw abdominal", "S3 cleaned", "S5 MECG cancelled", "S6 average fetal complex"]
+    
+    for ch in range(4):
         
-        if len(beats) > 0:
-            avg_beats[:, ch] = np.mean(beats, axis=0)
+        d1 = s1_raw[idx_start:idx_end, ch]
+        d3 = s3_cleaned[idx_start:idx_end, ch]
+        d5 = s5_cancelled[idx_start:idx_end, ch]
+        d6 = s6_avg_beat[:, ch]
+        
+        all_data_ch = np.concatenate([d1, d3, d5]) 
+        y_min = np.min(all_data_ch)
+        y_max = np.max(all_data_ch)
+        
+        margin = (y_max - y_min) * 0.1
+        y_lims = (y_min - margin, y_max + margin)
+
+        ax = axes[ch, 0]
+        ax.plot(d1, color=color_signal, lw=line_width)
+        ax.set_ylabel(f"AECG {ch+1}", fontsize=12, fontweight='bold')
+        ax.set_ylim(y_lims)
+        
+        ax = axes[ch, 1]
+        ax.plot(d3, color=color_signal, lw=line_width)
+        ax.set_ylim(y_lims)
+        
+        ax = axes[ch, 2]
+        ax.plot(d5, color="#C77415", lw=line_width)
+        ax.set_ylim(y_lims)
+        
+        ax = axes[ch, 3]
+        ax.plot(d6, color=color_beat, lw=2)
+        
+        for col in range(4):
+            ax_curr = axes[ch, col]
+            ax_curr.spines['top'].set_visible(False)
+            ax_curr.spines['right'].set_visible(False)
+            ax_curr.set_xticks([])
+            ax_curr.set_yticks([]) # Rimuove i numeri per pulizia
             
-    return avg_beats
+            if ch == 0:
+                ax_curr.set_title(cols_titles[col], fontsize=14, pad=15)
 
-def construct_s6_signal(s5_signal, peaks, fs=2000):
+    plt.show()
 
-    n_samples, n_channels = s5_signal.shape
-    s6 = np.zeros_like(s5_signal)
-    
-    window_sec = 0.25
-    win_samples = int(window_sec * fs)
-    half_win = win_samples // 2
-    
-    avg_templates = get_average_beat_per_channel(s5_signal, peaks, window_sec, fs)
-    
-    for ch in range(n_channels):
-        template = avg_templates[:, ch]
-        for p in peaks:
-            start = p - half_win
-            end = p + half_win
-            if start >= 0 and end < n_samples:
-                s6[start:end, ch] += template
-                
-    return s6
+def plot_reliability_correlations(df, x_fit, y_fit, fit_label):
 
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 3.5))
+
+    ax1.scatter(df['SNR'], df['Reliability_Pct'], marker='x', color='black', label='Dati')
+    
+    if len(x_fit) > 0:
+        ax1.plot(x_fit, y_fit, color='red', linewidth=2, label=fit_label)
+        ax1.legend(loc='lower right', fontsize='small')
+
+    ax1.set_xlabel('SNR [dB]', fontsize=11)
+    ax1.set_ylabel('SA reliability [%]', fontsize=11)
+    ax1.tick_params(direction='in')
+    ax1.grid(True, alpha=0.3)
+
+    ax2.scatter(df['SIR'], df['Reliability_Pct'], marker='x', color='black')
+    ax2.set_xlabel('SIR [dB]', fontsize=11)
+    ax2.set_ylabel('SA reliability [%]', fontsize=11)
+    ax2.tick_params(direction='in')
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
