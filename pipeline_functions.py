@@ -8,7 +8,7 @@ from adaptivePLICanceller import AdaptivePLICanceller
 import math
 from MECGCanceller import MECGCanceller
 from FetalECGExtractor import FetalECGExtractor
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA, FastICA
 import os
 import numpy as np
 
@@ -127,14 +127,16 @@ def extract_and_analyze(fetal_matrix, extractor, target_fs):
     return best_signal_fet, average_beat, f_peaks
 
 def extract_and_analyze_multichannel(fetal_matrix, extractor, target_fs):
-
+    """
+    Estrae il segnale fetale multicanale usando PCA e analizza i picchi.
+    """
     pca = PCA(n_components=1)
     detection_signal = pca.fit_transform(fetal_matrix).flatten()
 
     if np.abs(np.min(detection_signal)) > np.abs(np.max(detection_signal)):
         detection_signal = -detection_signal
 
-    f_peaks = extractor.detect_fetal_peaks(detection_signal, dist_sec=0.25)
+    f_peaks = extractor.detect_fetal_peaks(detection_signal)
 
     average_beat_matrix, _ = extractor.compute_average_beat(fetal_matrix, f_peaks, window_sec=0.125)
     
@@ -182,7 +184,7 @@ def calculate_paper_metrics(f_peaks, fs, total_samples):
     Calcola le metriche di reliability e BPM medio.
     """
     if len(f_peaks) < 5:
-        return 0.0, 0.0, False  # Traccia insufficiente
+        return 0.0, 0.0, False
 
     rr_sec = np.diff(f_peaks) / fs
     fhr_trace = 60.0 / rr_sec
@@ -219,10 +221,9 @@ def calculate_snr_sir(s4, s5, s6, noise):
     """
     Implementazione esatta Eq (4) e (5)
     """
-    # Evita divisioni per zero
+
     eps = 1e-10
     
-    # Calcolo Potenza del segnale (Mean Squared)
     def power(x):
         return np.mean(x**2, axis=0)
     
@@ -270,6 +271,51 @@ def subtract_average_beat(s5_signal, peaks, average_beat_matrix):
             noise_residual[start:end, :] -= average_beat_matrix
 
     return noise_residual
+
+def run_ica_and_select_best(S4, extractor, fs, n_samples_up):
+    """
+    Esegue FastICA e restituisce il dizionario del miglior candidato.
+    """
+    ica = FastICA(n_components=S4.shape[1], random_state=42, whiten='unit-variance')
+    S_ica = ica.fit_transform(S4)
+    
+    candidates = []
+    
+    for i in range(S_ica.shape[1]):
+        if i == 0:
+            continue
+        component = S_ica[:, i]
+        component_reshaped = component.reshape(-1, 1)
+        
+        try:
+            _, _, peaks_candidate = extract_and_analyze_multichannel(component_reshaped, extractor, fs)
+            rel, bpm, _ = calculate_paper_metrics(peaks_candidate, fs, n_samples_up)
+            
+            is_in_range = 110 < float(bpm) < 190 if bpm else False
+
+            candidates.append({
+                'idx': i,
+                'bpm': float(bpm) if bpm else 0.0,
+                'reliability': float(rel),
+                'is_in_range': is_in_range
+            })
+        except Exception:
+            continue
+
+    fetal_candidates = [c for c in candidates if c['is_in_range']]
+    
+    best_candidate = None
+    if fetal_candidates:
+        best_candidate = max(fetal_candidates, key=lambda x: x['reliability'])
+        print(f"   ICA Select: Comp {best_candidate['idx']} (BPM: {best_candidate['bpm']:.1f}, Rel: {best_candidate['reliability']:.2f})")
+    elif candidates:
+        print("   ICA Warning: Nessun feto nel range. Uso max reliability.")
+        best_candidate = max(candidates, key=lambda x: x['reliability'])
+    
+    if best_candidate:
+        return best_candidate
+        
+    return {'bpm': 0.0, 'reliability': 0.0}
 
 """
     Plot functions
@@ -335,7 +381,6 @@ def plot_results(rec_name, signal, detected_peaks, gt_peaks, extractor, target_f
         plt.legend(loc='upper right')
         plt.title(f"Morfologia Fetale Media (Multicanale) - Basata su {num_beats} battiti")
     else:
-        # Plot Monocanale
         plt.plot(t_ms, avg_beat, color='blue', lw=2)
         plt.title(f"Morfologia Fetale Media - Basata su {num_beats} battiti")
 
@@ -427,7 +472,7 @@ def plot_pipeline_stages(s1_raw, s3_cleaned, s5_cancelled, s6_avg_beat, fs, star
             ax_curr.spines['top'].set_visible(False)
             ax_curr.spines['right'].set_visible(False)
             ax_curr.set_xticks([])
-            ax_curr.set_yticks([]) # Rimuove i numeri per pulizia
+            ax_curr.set_yticks([])
             
             if ch == 0:
                 ax_curr.set_title(cols_titles[col], fontsize=14, pad=15)

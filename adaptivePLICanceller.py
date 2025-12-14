@@ -73,8 +73,7 @@ class AdaptivePLICanceller:
 
     def apply(self, signal):
         """
-        Esegue il loop di cancellazione adattiva (Sample-by-sample).
-        Implementa lo schema di Figura 4 e le Equazioni 30-32.
+        Esegue il loop di cancellazione adattiva (Sample-by-sample).s
         """
         
         n_samples = len(signal)

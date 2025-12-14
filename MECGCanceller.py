@@ -21,15 +21,6 @@ class MECGCanceller:
     def _detect_maternal_qrs(self, signal_matrix):
         """
         Rileva i complessi QRS materni utilizzando un approccio a due stadi per massima precisione temporale.
-
-        Fase 1:
-        - Fusione dei canali tramite PCA per isolare la componente materna dominante.
-        - Calcolo dell'inviluppo di Hilbert per enfatizzare i picchi di energia.
-        - Sogliatura dinamica per trovare i candidati R-peak iniziali.
-
-        Fase 2:
-        - Creazione di un template mediano dai battiti rilevati.
-        - Allineamento fine di ogni battito tramite cross-correlazione col template (metodo Abboud & Beker).
         """
         
         bp = self._bandpass_detect(signal_matrix)
@@ -118,13 +109,6 @@ class MECGCanceller:
         
         """
         Applica l'algoritmo di cancellazione dell'ECG materno (MECG) tramite sottrazione di template adattivo.
-
-        Il metodo esegue le seguenti operazioni:
-        1. Padding del segnale per gestire i bordi.
-        2. Rilevamento dei complessi QRS materni.
-        3. Per ogni canale, costruisce un template medio dinamico (running average) del battito materno.
-        4. Adatta il template al battito corrente (scaling dei segmenti P, QRS, T) utilizzando i minimi quadrati regolarizzati (Ridge Regression).
-        5. Sottrae la stima materna per isolare il residuo fetale.
         """
         
         _, n_channels = signal_matrix.shape
