@@ -119,12 +119,12 @@ Raw Signal (S1)
 ### Dependencies
 
 ```python
-numpy          # Numerical computing
-scipy          # Signal processing (butter, filtfilt, hilbert, resample_poly)
-sklearn        # PCA, FastICA for decomposition
-pandas         # Data manipulation and rolling statistics
-matplotlib     # Visualization
-wfdb           # PhysioNet database access
+numpy
+scipy
+sklearn
+pandas
+matplotlib
+wfdb
 ```
 
 ### Key Classes
